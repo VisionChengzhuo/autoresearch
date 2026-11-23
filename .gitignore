@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+*.bak-*
+campaigns/
+drills/
+tick.log
+watchdog.log
+
+# runtime data
+transfer/
+transfer.log
+logs/
+*.log
+.codex.lock

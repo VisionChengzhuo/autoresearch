@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Mirror H200 run records from the shared volume through an SSH sync host."""
+import argparse
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from ar import NAME, load, save, sha
+
+SHARED = os.environ.get("AR_SHARED_ROOT", "/srv/autoresearch/runs")
+KEEPER = os.environ.get("AR_KEEPER_STATUS", "/var/lib/h200-keepalive/state/status.json")
+SSH = "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+FILES = ("run.log", "result.json", "heartbeat.json")
+
+
+def sync_files(source, destination, filters=()):
+    subprocess.run(["rsync", "--archive", "--no-links", "--no-owner", "--no-group",
+                    "--no-devices", "--no-specials", "--protect-args", "--modify-window=-1",
+                    "--partial-dir=.rsync-partial",
+                    "--timeout=20", "-e", SSH, *filters, str(source), str(destination)],
+                   check=True, stdout=subprocess.DEVNULL, timeout=45)
+
+
+def publish(source, destination):
+    previous = destination.stat() if destination.exists() else None
+    current = source.stat()
+    if previous and (previous.st_dev, previous.st_ino) == (current.st_dev, current.st_ino):
+        return
+    temporary = destination.with_name("." + destination.name + ".incoming")
+    temporary.unlink(missing_ok=True)
+    os.link(source, temporary)
+    os.replace(temporary, destination)
+
+
+def sync(host, source, root):
+    stage = root / ".incoming"
+    incoming = stage / "runs"
+    incoming.mkdir(parents=True, exist_ok=True)
+    filters = ["--include=/*/", "--include=/*/*/"]
+    filters += [f"--include=/*/*/{name}" for name in FILES]
+    sync_files(f"{host}:{source.rstrip('/')}/", incoming, [*filters, "--exclude=*"])
+    local = root / "runs"
+    for campaign in incoming.iterdir():
+        if not NAME.fullmatch(campaign.name) or not campaign.is_dir():
+            continue
+        for run in campaign.iterdir():
+            if not NAME.fullmatch(run.name) or not run.is_dir():
+                continue
+            destination = local / campaign.name / run.name
+            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Expose result and log before exposing the terminal heartbeat.
+            for name in FILES:
+                source_file = run / name
+                if not source_file.is_file():
+                    continue
+                if name == "heartbeat.json":
+                    try:
+                        digest = load(source_file).get("result_sha256")
+                        if digest and sha(destination / "result.json") != digest:
+                            continue
+                    except (OSError, ValueError):
+                        continue
+                publish(source_file, destination / name)
+    save(root / "status.json", {"time": time.time(), "ok": True})
+    # Resource telemetry is independent of experiment delivery.
+    sync_files(f"{host}:{KEEPER}", stage / "keeper.json")
+    leases = root / "leases"
+    if leases.is_dir():
+        remote_leases = str(Path(source).parent / "leases")
+        sync_files(str(leases) + "/", f"{host}:{remote_leases}/",
+                   ["--mkpath", "--chmod=D700,F600", "--include=/*/", "--include=/*/*.json", "--exclude=*"])
+    keeper = load(stage / "keeper.json")
+    snapshots = root / "resources"
+    snapshots.mkdir(mode=0o700, exist_ok=True)
+    records = keeper["records"]
+    if keeper["state"] != "checked" or len(records) != 1:
+        raise ValueError("keeper does not report one active H200 record")
+    record, info = next(iter(records.items()))
+    for role in ("launcher", "worker"):
+        pod = info["pods"][role]
+        alarm = bool(keeper["alerts"] or pod["alerts"] or pod["daemon"]["alarm"]
+                     or pod["daemon"]["state"] != "running"
+                     or len(pod["gpus"]) != 8 or pod["shm_used_bytes"] >= 6_800_000_000)
+        save(snapshots / f"{role}.json", {
+            "time": keeper["checked_at"], "machine": pod["host"], "role": role,
+            "record": record, "pod": pod["pod"], "alarm": alarm,
+            "shm_fraction": pod["shm_percent"] / 100, "memory_fraction": pod["ram_percent"] / 100,
+        })
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default=os.environ.get("AR_SYNC_HOST"))
+    parser.add_argument("--source", default=SHARED)
+    parser.add_argument("--root", type=Path, default=Path.home() / "autoresearch/transfer")
+    args = parser.parse_args()
+    if not args.host or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.host) or not args.source.startswith("/"):
+        parser.error("expected an SSH host alias (--host or AR_SYNC_HOST) and an absolute source path")
+    os.umask(0o077)
+    args.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (args.root / ".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        try:
+            sync(args.host, args.source, args.root)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            print(f"ar-transfer: {type(error).__name__}: {error}", file=sys.stderr)
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

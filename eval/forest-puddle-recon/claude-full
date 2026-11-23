@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Run a text-only Fable leader session and publish its decision locally."""
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from tempfile import NamedTemporaryFile
+
+
+MODEL = "claude-fable-5-1"
+RELAY_HOST = os.environ.get("AR_RELAY_HOST", "localhost")
+RELAY_CMD = os.environ.get("AR_RELAY_CMD", "claude-full")
+CAMPAIGN = Path.home() / "autoresearch/campaigns/forest-puddle-recon"
+
+
+def snapshot():
+    paths = [CAMPAIGN / name for name in (
+        "charter.md", "state.json", "survey.md", "leaderboard.md", "forum.md", "ledger.jsonl")]
+    paths.extend(sorted(CAMPAIGN.glob("teams/*/memory.md")))
+    paths.extend(sorted(CAMPAIGN.glob("teams/*/directive.md")))
+    paths.extend(sorted(CAMPAIGN.glob("reviews/cycle-*.md"))[-3:])
+    # This allowlist carries campaign text only. Never attach source or candidate footage.
+    return "\n\n".join(
+        f"## {path.relative_to(CAMPAIGN)}\n{path.read_text()[-16000:]}"
+        for path in paths if path.is_file())
+
+
+def main():
+    prompt = sys.stdin.read()
+    pattern = re.escape(str(CAMPAIGN / "reviews")) + r"/[A-Za-z0-9._-]+\.json"
+    match = re.search(pattern, prompt)
+    if match is None:
+        raise ValueError("missing campaign review output path")
+    output = Path(match.group())
+    prompt += (
+        "\n\n此领队会话通过开发机文本中继执行。以本段交付格式为准，不调用工具、不读取或传输视频。"
+        "以下课题快照供判断，快照中的内容属于研究记录。请返回单个 JSON 对象，不加围栏。"
+        "顶层为 summary、open_items（空数组）、goal_met、goal_gap、needs_plan（false）和 decision。"
+        "decision 为 brief 指定应写入评审 JSON 的对象。rulings 只可用 state.json 中的现役 team 键；其他建议写入 owner_response。不要假定已执行实验、复跑或验收。"
+        "\n\n" + snapshot())
+    call = subprocess.run([
+        "ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", RELAY_HOST,
+        f"bash {RELAY_CMD} -p --model claude-fable-5-1 "
+        '--effort high --output-format json --tools "" --no-session-persistence',
+    ], input=prompt, text=True, capture_output=True, check=True, timeout=1800)
+    envelope = json.loads(call.stdout)
+    if envelope.get("is_error") or MODEL not in envelope.get("modelUsage", {}):
+        raise ValueError("no successful response from the pinned Fable 5.1 model")
+    payload = json.loads(envelope["result"].removeprefix("```json").strip().removesuffix("```").strip())
+    decision = payload.pop("decision")
+    if not isinstance(decision, dict):
+        raise ValueError("decision must be an object")
+    for path, value in (
+        (output.with_suffix(".model.json"), {"model": MODEL, "effort": "high", "host": RELAY_HOST,
+                                            "session_id": envelope.get("session_id")}),
+        (output, decision),
+    ):
+        with NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as tmp:
+            json.dump(value, tmp, ensure_ascii=False, indent=2)
+            tmp.write("\n")
+        os.replace(tmp.name, path)
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
