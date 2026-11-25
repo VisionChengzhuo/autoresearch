@@ -66,8 +66,9 @@ else:
     elif cmd == "ask" and args[0] == "FA-99":
         (base / "question.json").write_text(json.dumps({"identifier": "FA-99", "state": {"name": "Human Intervention"}}))
     elif cmd == "ask":
-        assert args[0] == "FA-1" and args[-1] == "--accept"
-        issue["state"] = {"id": "Human Intervention", "name": "Human Intervention"}
+        assert args[0] == "FA-1"
+        if args[-1] != "--accept":
+            raise SystemExit(0)
         value = "2026-01-01T00:00:00+00:00"
         issue["description"] = f"## 验收申请\n申请时间：{value}\n\n{args[1]}"
         file.write_text(json.dumps(issue))

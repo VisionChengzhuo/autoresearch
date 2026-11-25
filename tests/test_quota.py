@@ -66,7 +66,8 @@ class QuotaTest(unittest.TestCase):
         fixture.tick()
         self.assertEqual(fixture.state()["status"], "throttled")
         self.assertEqual(ar.load(fixture.issue)["state"]["name"], "In Progress")
-        self.assertEqual(sum(call[:2] == ["linear-app", "new"] for call in fixture.calls()), 1)
+        self.assertFalse(any(call[:2] == ["linear-app", "new"] for call in fixture.calls()))
+        self.assertEqual([call[2] for call in fixture.calls() if call[:2] == ["linear-app", "ask"]], ["FA-1"])
 
     def test_gpu_lease_reserves_all_slots_and_bills_failed_run_after_outage(self):
         fixture = self.loop

@@ -265,8 +265,13 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(watchdog.returncode, 1)
         self.assertIn("heartbeat stale", watchdog.stderr)
         errors = self.tick(900)
-        self.assertIn("restoring In Progress", errors)
-        self.assertEqual(ar.load(self.issue)["state"]["name"], "In Progress")
+        self.assertNotIn("restoring In Progress", errors)
+        self.assertEqual(ar.load(self.issue)["state"]["name"], "Done")
+        self.assertEqual(self.state()["linear_hold"], "Done")
+        self.assertFalse(any(call[:2] in (["linear-app", "state"], ["linear-app", "comment"])
+                             for call in self.calls()))
+        self.cards("In Progress")
+        self.tick()
         ledger = ar.rows(self.campaign / "ledger.jsonl")
         self.assertEqual([row["status"] for row in ledger],
                          ["running", "running", "failed", "succeeded"])
@@ -473,7 +478,7 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(len(texts), len(set(texts)))
         self.assertEqual(self.state()["outbox_sent"], len(ar.rows(self.campaign / "outbox.jsonl")))
 
-    def test_only_question_creates_a_card_and_fake_campaign_jobs_have_no_card(self):
+    def test_question_uses_campaign_card_and_fake_campaign_jobs_have_no_card(self):
         self.config["drill"] = True
         ar.save(self.campaign / "config.json", self.config)
         self.tick()
@@ -494,10 +499,9 @@ class LoopTest(unittest.TestCase):
                           "recommendation": "A", "waiting": "假实验 P1"})
         self.cli("question", "fake", str(request))
         self.cli("question", "fake", str(request))
-        self.assertEqual([call[2] for call in self.calls() if call[:2] == ["linear-app", "new"]],
-                         ["[AR fake/choose] 假实验选 A 吗？"])
-        self.assertEqual([call[2] for call in self.calls() if call[:2] == ["linear-app", "ask"]], ["FA-99"])
-        self.assertTrue(any("FA-99" in sent["text"] for sent in ar.rows(self.base / "aligned.jsonl")))
+        self.assertFalse(any(call[:2] == ["linear-app", "new"] for call in self.calls()))
+        self.assertEqual([call[2] for call in self.calls() if call[:2] == ["linear-app", "ask"]], ["FA-1"])
+        self.assertTrue(any("FA-1" in sent["text"] for sent in ar.rows(self.base / "aligned.jsonl")))
         self.assertFalse(any(call[:2] == ["linear-app", "state"] for call in self.calls()))
 
     def test_compressed_timing_two_reviews_pause_resume_and_fresh_progress(self):
@@ -654,7 +658,8 @@ class LoopTest(unittest.TestCase):
         self.tick()
         self.tick()
         self.assertEqual(self.state()["status"], "running")
-        self.assertEqual(ar.load(self.issue)["state"]["name"], "Human Intervention")
+        self.assertEqual(ar.load(self.issue)["state"]["name"], "In Progress")
+        self.assertTrue(self.state()["acceptance"])
         self.assertEqual(sum(row[:2] == ["linear-app", "ask"] for row in self.calls()), 1)
 
 

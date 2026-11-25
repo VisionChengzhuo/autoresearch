@@ -347,7 +347,7 @@ class Campaign:
         return re.search(rf"^{marker}$", issue.get("description") or "", re.MULTILINE) is not None
 
     def open_acceptance(self, issue, record):
-        return (issue["state"]["name"] in ACCEPTANCE_STATES
+        return (issue["state"]["name"] in ACCEPTANCE_STATES | {"In Progress", "Todo"}
                 and record.get("status") in {"open", "closing"}
                 and self.acceptance_on_card(issue, record))
 
@@ -410,12 +410,15 @@ class Campaign:
         record = self.acceptance_record(issue)
         if self.open_acceptance(issue, record):
             self.state["acceptance"] = {"time": timestamp(record["requested_at"])}
-            return True
+        elif self.state.pop("acceptance", None):
+            self.event("acceptance_resolved")
+        self.clear("card_state")
         if status == "In Progress":
-            if self.state.pop("acceptance", None):
-                self.event("acceptance_resolved")
-            self.clear("card_state")
+            self.state.pop("linear_hold", None)
             return True
+        if status in {"Todo", "Human Intervention", "In Review", "Backlog", "常驻"}:
+            self.record_card_hold(status)
+            return False
         latest = self.last_transition(issue)
         owner = self.config.get("linear_owner_id")
         if not owner:
@@ -436,11 +439,13 @@ class Campaign:
                 self.state["status"] = "stopped"
                 self.event("owner_linear_stop", status=status)
             return False
-        self.alert("card_state", f"{self.card} unexpected state {status}; restoring In Progress")
-        command(self.linear, "state", self.card, "In Progress")
-        command(self.linear, "comment", self.card, f"巡检发现课题卡处于 {status}，已恢复为 In Progress。")
-        self.state.pop("acceptance", None)
-        return True
+        self.record_card_hold(status)
+        return False
+
+    def record_card_hold(self, status):
+        if self.state.get("linear_hold") != status:
+            self.state["linear_hold"] = status
+            self.event("linear_dispatch_held", state=status)
 
     def reconcile_jobs(self, allow_dispatch):
         events = self.path / "amb_events.jsonl"
@@ -772,7 +777,8 @@ class Campaign:
         status = self.state["status"]
         if status in {"paused", "stopped"}:
             return status
-        return None
+        card_state = self.state.get("linear_hold")
+        return f"Linear {card_state}" if card_state else None
 
     def can_submit(self, job):
         status = self.state["status"]
@@ -1187,26 +1193,16 @@ class Campaign:
             raise ValueError("question id already has a different request")
         if record.get("queued"):
             return
+        # Keep any existing question on its original card. New ones use the campaign card.
         if not record.get("card"):
-            # Look up a successfully created issue before retrying a timed-out create.
-            query = ("query($title:String!){issues(first:2,filter:{title:{eq:$title}})"
-                     "{nodes{identifier state{name}}}}")
-            cards = json.loads(command(self.linear, "gql", query,
-                                       json.dumps({"title": title})))["issues"]["nodes"]
-            if len(cards) > 1:
-                raise ValueError("multiple Linear cards match the question id")
-            if cards:
-                record["card"] = cards[0]["identifier"]
-            else:
-                result = command(self.linear, "new", title, "--goal", body,
-                                 "--project", self.config["project"])
-                record["card"] = result.split()[0]
-            if not CARD.fullmatch(record["card"]) or record["card"] == self.card:
-                raise ValueError("invalid question card")
+            record["card"] = self.card
             save(path, record)
-        issue = self.linear_read("query($id:String!){issue(id:$id){state{name}}}", id=record["card"])
-        if issue["state"]["name"] not in ACCEPTANCE_STATES:
-            command(self.linear, "ask", record["card"], body)
+        if record["card"] == self.card:
+            command(self.linear, "ask", self.card, body)
+        else:
+            issue = self.linear_read("query($id:String!){issue(id:$id){state{name}}}", id=record["card"])
+            if issue["state"]["name"] not in ACCEPTANCE_STATES | {"Done", "Canceled"}:
+                command(self.linear, "ask", record["card"], body)
         self.notify("question", f"{record['card']}\n\n{body}")
         record["queued"] = True
         save(path, record)
@@ -1331,7 +1327,7 @@ class Campaign:
                 if not run.get(key):
                     raise ValueError(f"GPU experiment requires {key}")
             if not self.config.get("resources") or not self.config.get("resource_rules"):
-                raise ValueError("GPU experiments require resource monitoring and KML rules")
+                raise ValueError("GPU experiments require resource monitoring and cluster resource rules")
             slots = self.slots(runs)
             expiry = timestamp(run["lease_until"])
             if not math.isfinite(expiry) or expiry <= self.now:

@@ -27,17 +27,18 @@ with tempfile.TemporaryDirectory() as tmp:
             assert "值为 0.42。" in description.call_args.args[-1]["progress"]
             assert "重复三次。" in description.call_args.args[-1]["next"]
             adapter["main"](["ask", "FA-1", "三次留出集评测达到阈值。", "--accept"])
-            assert update.call_args.kwargs["stateId"] == namespace["STATES"]["Human Intervention"]
+            update.assert_not_called()
             record = adapter["read_record"](card)
             assert record["status"] == "open" and record["requested_at"]
-            assert "三次留出集评测达到阈值。" in notify.call_args.args[-1]
+            assert "三次留出集评测达到阈值。" in description.call_args.args[-1]["accepted"]
+            notify.assert_not_called()
             update.reset_mock()
             for state in ("Done", "Canceled"):
                 try:
                     adapter["main"](["state", "FA-1", state])
-                except adapter["WriteRejected"]:
+                except adapter["LinearError"]:
                     pass
                 else:
                     raise AssertionError(f"unauthorized state {state} was accepted")
             update.assert_not_called()
-print("linear-app progress, persisted acceptance, and guarded long-card states verified offline")
+print("linear-app progress, persisted acceptance, and required long-card closing evidence verified offline")

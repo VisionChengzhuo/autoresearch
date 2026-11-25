@@ -43,7 +43,7 @@ def review(model, candidate, provenance):
         "candidate_sha256（来自报告）及 reason。不得引用另一验收者。"
         "\n\n本地检查报告\n" + json.dumps(evidence, ensure_ascii=False)
         + "\n\n纯文字审计材料\n" + provenance)
-    with tempfile.TemporaryDirectory(prefix="forest-puddle-review-") as folder:
+    with tempfile.TemporaryDirectory(prefix="video-reconstruction-review-") as folder:
         process = subprocess.run(COMMANDS[model], input=prompt, text=True, cwd=folder,
                                  capture_output=True, check=True, timeout=1800)
         if model == FABLE:

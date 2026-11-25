@@ -218,12 +218,13 @@ class StopAuthorizationTest(unittest.TestCase):
 
     def test_automated_closure_rejects_wrong_card_even_if_quoted(self):
         self.assertEqual(self.check_automated_closure(APPROVAL.replace("FA-10", "FA-11")),
-                         (True, "running"))
-        self.assertEqual(self.command.call_args_list[0].args[1:], ("state", "FA-10", "In Progress"))
+                         (False, "running"))
+        self.command.assert_not_called()
 
     def test_automated_closure_rejects_an_obsolete_request(self):
         self.issue["description"] = self.issue["description"].replace("01:00:00", "01:02:30")
-        self.assertEqual(self.check_automated_closure(APPROVAL), (True, "running"))
+        self.assertEqual(self.check_automated_closure(APPROVAL), (False, "running"))
+        self.command.assert_not_called()
 
     def test_manual_owner_closure_retains_priority(self):
         self.assertEqual(self.check_automated_closure("历史记录里的无关消息", manual=True),

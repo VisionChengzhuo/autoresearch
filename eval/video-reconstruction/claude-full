@@ -12,7 +12,7 @@ from tempfile import NamedTemporaryFile
 MODEL = "claude-fable-5-1"
 RELAY_HOST = os.environ.get("AR_RELAY_HOST", "localhost")
 RELAY_CMD = os.environ.get("AR_RELAY_CMD", "claude-full")
-CAMPAIGN = Path.home() / "autoresearch/campaigns/forest-puddle-recon"
+CAMPAIGN = Path.home() / "autoresearch/campaigns/video-reconstruction"
 
 
 def snapshot():
